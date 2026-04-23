@@ -119,7 +119,6 @@ mcpServer.tool('puppeteer_content', 'Get the raw text content of the page body',
 // Setup Express App
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 // Authentication Middleware
 const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
