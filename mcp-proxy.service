@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 # IMPORTANT: Adjust these paths and User to match your actual VPS setup!
-User=ubuntu
-WorkingDirectory=/home/ubuntu/mcp_browser
+User=dimakor
+WorkingDirectory=/home/dimakor/mcp_browser
 
 # Start the server
 ExecStart=/usr/bin/npm run start

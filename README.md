@@ -26,9 +26,9 @@ sudo apt install caddy
 ```
 
 ### 2. Install Project Dependencies
-Clone this repository to your VPS (e.g., in `/home/ubuntu/mcp_browser`), then install the Node packages:
+Clone this repository to your VPS (e.g., in `/home/dimakor/mcp_browser`), then install the Node packages:
 ```bash
-cd /home/ubuntu/mcp_browser
+cd /home/dimakor/mcp_browser
 npm install
 npm run build
 ```
