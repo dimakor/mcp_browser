@@ -52,87 +52,81 @@ async function getPage(): Promise<Page> {
   return page;
 }
 
-// Initialize the MCP Server
-const mcpServer = new McpServer({
-  name: 'mcp-proxy-puppeteer',
-  version: '1.0.0',
-});
+// Factory: register all Puppeteer tools on a given McpServer instance
+function registerTools(server: McpServer): void {
+  server.tool('puppeteer_navigate', 'Navigate to a specific URL',
+    { url: z.string().url() },
+    async ({ url }) => {
+      const p = await getPage();
+      await p.goto(url, { waitUntil: 'networkidle2' });
+      return {
+        content: [{ type: 'text', text: `Navigated to ${url}` }]
+      };
+    }
+  );
 
-// Tool: Navigate
-mcpServer.tool('puppeteer_navigate', 'Navigate to a specific URL',
-  { url: z.string().url() },
-  async ({ url }) => {
-    const p = await getPage();
-    await p.goto(url, { waitUntil: 'networkidle2' });
-    return {
-      content: [{ type: 'text', text: `Navigated to ${url}` }]
-    };
-  }
-);
+  server.tool('puppeteer_screenshot', 'Take a screenshot of the current page',
+    {},
+    async () => {
+      const p = await getPage();
+      const screenshot = await p.screenshot({ encoding: 'base64' });
+      return {
+        content: [{
+          type: 'image',
+          data: screenshot as string,
+          mimeType: 'image/png'
+        }]
+      };
+    }
+  );
 
-// Tool: Screenshot
-mcpServer.tool('puppeteer_screenshot', 'Take a screenshot of the current page',
-  {},
-  async () => {
-    const p = await getPage();
-    const screenshot = await p.screenshot({ encoding: 'base64' });
-    return {
-      content: [{
-        type: 'image',
-        data: screenshot as string,
-        mimeType: 'image/png'
-      }]
-    };
-  }
-);
+  server.tool('puppeteer_click', 'Click an element matching the CSS selector',
+    { selector: z.string() },
+    async ({ selector }) => {
+      const p = await getPage();
+      await p.click(selector);
+      return {
+        content: [{ type: 'text', text: `Clicked element: ${selector}` }]
+      };
+    }
+  );
 
-// Tool: Click
-mcpServer.tool('puppeteer_click', 'Click an element matching the CSS selector',
-  { selector: z.string() },
-  async ({ selector }) => {
-    const p = await getPage();
-    await p.click(selector);
-    return {
-      content: [{ type: 'text', text: `Clicked element: ${selector}` }]
-    };
-  }
-);
+  server.tool('puppeteer_fill', 'Fill an input element with text',
+    { selector: z.string(), text: z.string() },
+    async ({ selector, text }) => {
+      const p = await getPage();
+      await p.type(selector, text);
+      return {
+        content: [{ type: 'text', text: `Filled element ${selector} with text` }]
+      };
+    }
+  );
 
-// Tool: Fill
-mcpServer.tool('puppeteer_fill', 'Fill an input element with text',
-  { selector: z.string(), text: z.string() },
-  async ({ selector, text }) => {
-    const p = await getPage();
-    await p.type(selector, text);
-    return {
-      content: [{ type: 'text', text: `Filled element ${selector} with text` }]
-    };
-  }
-);
+  server.tool('puppeteer_evaluate', 'Execute JavaScript on the page and return the result',
+    { script: z.string() },
+    async ({ script }) => {
+      const p = await getPage();
+      const result = await p.evaluate(script);
+      return {
+        content: [{ type: 'text', text: `Result: ${JSON.stringify(result)}` }]
+      };
+    }
+  );
 
-// Tool: Evaluate
-mcpServer.tool('puppeteer_evaluate', 'Execute JavaScript on the page and return the result',
-  { script: z.string() },
-  async ({ script }) => {
-    const p = await getPage();
-    const result = await p.evaluate(script);
-    return {
-      content: [{ type: 'text', text: `Result: ${JSON.stringify(result)}` }]
-    };
-  }
-);
+  server.tool('puppeteer_content', 'Get the raw text content of the page body',
+    {},
+    async () => {
+      const p = await getPage();
+      const content = await p.evaluate(() => document.body.innerText);
+      return {
+        content: [{ type: 'text', text: content }]
+      };
+    }
+  );
+}
 
-// Tool: Get Page Content
-mcpServer.tool('puppeteer_content', 'Get the raw text content of the page body',
-  {},
-  async () => {
-    const p = await getPage();
-    const content = await p.evaluate(() => document.body.innerText);
-    return {
-      content: [{ type: 'text', text: content }]
-    };
-  }
-);
+// Active sessions: sessionId -> { transport, mcpServer }
+const sessions = new Map<string, { transport: SSEServerTransport; server: McpServer }>();
 
 // Setup Express App
 const app = express();
@@ -156,21 +150,40 @@ const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
   next();
 };
 
-// We need a global transport variable to connect the two endpoints
-let transport: SSEServerTransport;
-
-// Endpoint 1: Establish SSE connection
+// Endpoint 1: Establish SSE connection (one per client)
 app.get('/mcp/sse', authMiddleware, async (req, res) => {
-  transport = new SSEServerTransport('/mcp/messages', res);
-  await mcpServer.connect(transport);
+  const transport = new SSEServerTransport('/mcp/messages', res);
+  const sessionId = transport.sessionId;
+
+  // Create a fresh MCP server for this session
+  const server = new McpServer({
+    name: 'mcp-proxy-puppeteer',
+    version: '1.0.0',
+  });
+  registerTools(server);
+
+  sessions.set(sessionId, { transport, server });
+  console.log(`[+] Session ${sessionId} connected (${sessions.size} active)`);
+
+  // Clean up when the client disconnects
+  res.on('close', () => {
+    sessions.delete(sessionId);
+    console.log(`[-] Session ${sessionId} disconnected (${sessions.size} active)`);
+  });
+
+  await server.connect(transport);
 });
 
-// Endpoint 2: Receive messages from client
+// Endpoint 2: Receive messages from client (routed by sessionId)
 app.post('/mcp/messages', authMiddleware, async (req, res) => {
-  if (!transport) {
-    return res.status(400).json({ error: 'SSE connection not established' });
+  const sessionId = req.query.sessionId as string;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(400).json({ error: 'No active SSE session for this sessionId' });
   }
-  await transport.handlePostMessage(req, res);
+
+  await session.transport.handlePostMessage(req, res);
 });
 
 // Cleanup on exit
@@ -183,5 +196,6 @@ process.on('SIGINT', async () => {
 
 app.listen(PORT, () => {
   console.log(`MCP Puppeteer Proxy Server running on port ${PORT}`);
+  console.log(`Supports multiple simultaneous connections`);
   console.log(`Requires API_KEY for access to /mcp/sse and /mcp/messages`);
 });
