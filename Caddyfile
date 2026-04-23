@@ -1,0 +1,5 @@
+# Replace yourdomain.com with your actual domain or VPS IP (if using IP, Caddy will use a self-signed cert)
+yourdomain.com:9443 {
+    # Reverse proxy to the local Express server
+    reverse_proxy localhost:8000
+}

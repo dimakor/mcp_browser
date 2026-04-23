@@ -1,0 +1,21 @@
+[Unit]
+Description=MCP Proxy Puppeteer Server
+After=network.target
+
+[Service]
+# IMPORTANT: Adjust these paths and User to match your actual VPS setup!
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mcp_browser
+
+# Start the server
+ExecStart=/usr/bin/npm run start
+
+# Automatically restart if it crashes
+Restart=always
+RestartSec=5
+
+# Set production environment
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
