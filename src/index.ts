@@ -24,12 +24,30 @@ async function getPage(): Promise<Page> {
   if (!browser) {
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+      ]
     });
   }
   if (!page) {
     const pages = await browser.pages();
     page = pages.length > 0 ? pages[0] : await browser.newPage();
+
+    // Mask headless browser fingerprint
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+    );
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    });
+    // Remove navigator.webdriver flag
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
   }
   return page;
 }
