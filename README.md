@@ -15,6 +15,36 @@ Antigravity (Windows) ←→ SSE Bridge (Python) ←→ Caddy (HTTPS :9443) ←�
 
 Сервер поддерживает **несколько одновременных SSE-соединений** — каждый клиент получает собственную MCP-сессию, маршрутизируемую по `sessionId`.
 
+## Контракт для MCP-клиентов и агентов
+
+Этот сервер сейчас предоставляет **Standard MCP SSE transport**:
+
+1. Клиент открывает долгоживущее соединение:
+   ```http
+   GET /mcp/sse
+   Authorization: Bearer <API_KEY>
+   ```
+2. Сервер сам генерирует `sessionId`, регистрирует сессию и отправляет SSE-событие:
+   ```text
+   event: endpoint
+   data: /mcp/messages?sessionId=<server-generated-session-id>
+   ```
+3. Клиент отправляет JSON-RPC POST только на endpoint, который вернул сервер:
+   ```http
+   POST /mcp/messages?sessionId=<server-generated-session-id>
+   Authorization: Bearer <API_KEY>
+   ```
+4. HTTP-ответ на POST обычно `202 Accepted` с пустым телом. Это нормально для SSE transport: полноценный JSON-RPC ответ приходит обратно по открытому SSE-стриму.
+5. SSE-соединение должно оставаться открытым на время MCP-сессии. Когда SSE закрывается, сервер удаляет session context, и последующие POST на тот же `sessionId` будут получать `400 No active SSE session for this sessionId`.
+
+Важные правила для агентов:
+
+- Не полагайтесь на `sessionId`, переданный клиентом в `GET /mcp/sse?sessionId=...`. Используйте `sessionId` из `event: endpoint`.
+- Не пытайтесь парсить тело `202 Accepted` как JSON. JSON-RPC responses передаются через SSE.
+- `notifications/initialized` является MCP notification без `id`; обработку выполняет MCP SDK.
+- Этот endpoint не является StreamableHTTP endpoint. Если клиент требует StreamableHTTP, нужен отдельный серверный endpoint на `StreamableHTTPServerTransport` или совместимый bridge. Не смешивайте ожидания StreamableHTTP с `/mcp/sse`.
+- `400 No active SSE session for this sessionId` означает неверный `sessionId` или уже закрытый SSE-стрим, а не ошибку JSON-RPC handler.
+
 ## Доступные инструменты (MCP Tools)
 
 | Инструмент | Описание |
@@ -103,14 +133,19 @@ sudo systemctl start mcp-proxy
 sudo systemctl status mcp-proxy
 ```
 
-## Подключение Antigravity (Windows)
+## Подключение MCP-клиента через stdio bridge
 
 ### Требования
-- Python 3.10+ с пакетом `mcp` (`pip install mcp`)
+- Python 3.10+
+- Пакеты Python: `mcp` и `httpx`
+
+```bash
+pip install mcp httpx
+```
 
 ### Конфигурация
 
-Отредактируйте файл `mcp_config.json` Antigravity:
+Для Codex, Antigravity или другого stdio MCP-клиента укажите `sse-bridge.py` как локальный MCP server. Пример:
 
 ```json
 {
@@ -136,19 +171,62 @@ sudo systemctl status mcp-proxy
 
 ### Принцип работы bridge
 
-`sse-bridge.py` открывает SSE-соединение к удалённому серверу и выставляет локальный stdio-транспорт. Antigravity видит его как обычный MCP-сервер, а все команды прозрачно проксируются на VPS.
+`sse-bridge.py` открывает удалённое MCP-соединение и выставляет локальный stdio-транспорт. MCP-клиент видит bridge как обычный локальный MCP-сервер, а все команды прозрачно проксируются на VPS.
+
+Для текущего сервера используйте URL вида:
+
+```text
+https://<VPS_IP>:9443/mcp/sse
+```
+
+Bridge умеет auto-detect Standard SSE и StreamableHTTP на стороне удалённого endpoint, но сам `mcp_browser` сейчас публикует именно Standard SSE на `/mcp/sse`.
+
+## Проверка для агентов
+
+Минимальная проверка после деплоя:
+
+```bash
+curl -sS http://127.0.0.1:8000/health
+npm run build
+```
+
+Проверка с клиентской машины:
+
+```bash
+python test_sse.py
+python test_pecom.py
+```
+
+Ожидаемые признаки рабочей установки:
+
+- `/health` возвращает `{"ok":true,...}`.
+- `test_sse.py` получает `event: endpoint` и POST на returned endpoint отвечает `202 Accepted`.
+- `test_pecom.py` видит MCP tools и получает текст с `https://pecom.ru/`.
+- В списке tools должны быть `proxy_fetch`, `proxy_read_page`, `proxy_find_links`, `proxy_download`, а также `puppeteer_*`.
+
+## Диагностика типовых проблем
+
+| Симптом | Вероятная причина | Что проверить |
+|---------|-------------------|---------------|
+| `400 No active SSE session for this sessionId` | POST отправлен не на returned endpoint или SSE уже закрыт | Держите GET `/mcp/sse` открытым и используйте `sessionId` из `event: endpoint` |
+| Клиент падает на пустом `202 Accepted` | Клиент ожидает JSON в теле POST, а не Standard SSE | Используйте SSE MCP client или `sse-bridge.py`; JSON-RPC ответ приходит по SSE |
+| `Session terminated` в клиенте, ожидающем StreamableHTTP | Клиент подключается к `/mcp/sse` как к StreamableHTTP | Настройте Standard SSE или добавьте отдельный StreamableHTTP endpoint |
+| Tools не видны в Codex/агенте | Конфиг MCP изменён, но клиент не перезапущен | Перезапустите клиент/создайте новую сессию |
+| Сайт возвращает `403` | Блокировка конкретного сайта, WAF, cookies/captcha, User-Agent | Сравните `proxy_fetch` и `proxy_read_page`, попробуйте другой `waitUntil`, проверьте headers/cookies |
+| `EADDRINUSE :8000` | Старый ручной `node build/index.js` держит порт | Остановите старый процесс и запускайте только systemd-service |
 
 ## Обновление на сервере
 
 ```bash
 cd ~/mcp_browser
 git pull
+npm install
 npm run build
-fuser -k 8000/tcp    # остановить текущий процесс
-nohup node build/index.js > /tmp/mcp-proxy.log 2>&1 &
 ```
 
-Или через systemd:
+Перезапуск через systemd:
+
 ```bash
 sudo systemctl restart mcp-proxy
+sudo systemctl status mcp-proxy --no-pager
 ```
